@@ -1,0 +1,14 @@
+batch_size: 16
+epochs: 100
+lr: 0.0003
+weight_decay: 0.01
+
+encoder: "openclip-vit-b-16"
+freeze_encoder: true
+
+image_size: 224
+save_path: "outputs/checkpoints/grading.pt"
+
+# New
+val_split: 0.2
+use_val_split: true
