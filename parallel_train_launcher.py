@@ -8,10 +8,10 @@ from training.train_segmentation import run_training_loop as training_loop_seg
 from training.train_localization import run_training_loop as training_loop_loc
 
 # --- Load Configs ---
-with open("/workspace/akeso/Akeso-Diabetic-Retinopathy-AI/config/grading_config.yaml") as f:
+with open("config/grading_config.yaml") as f:
     grad_cfg = yaml.safe_load(f)
 
-with open("/workspace/akeso/Akeso-Diabetic-Retinopathy-AI/config/segmentation_config.yaml") as f:
+with open("config/segmentation_config.yaml") as f:
     seg_cfg = yaml.safe_load(f)
 
 loc_config = {
