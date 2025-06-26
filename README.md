@@ -1,11 +1,3 @@
-Here’s the full, updated `README.md` incorporating:
-
-* ✅ Final benchmark results
-* ✅ Comparative table with global models
-* ✅ All previous sections retained and refined
-
----
-
 # 🧐 Akeso: Modular Vision & Language System for Retinal Disease Diagnosis
 
 > **One-liner:**
