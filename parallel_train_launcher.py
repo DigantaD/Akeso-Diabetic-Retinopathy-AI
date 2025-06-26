@@ -17,7 +17,7 @@ with open("config/segmentation_config.yaml") as f:
 loc_config = {
     "image_size": (224, 224),
     "batch_size": 8,
-    "epochs": 100,
+    "epochs": 50,
     "lr": 1e-4,
     "lambda_align": 1.0,
     "lambda_clip": 0.5,
@@ -28,7 +28,8 @@ loc_config = {
     "vlm_pretrained": "openai",
     "amp": True,
     "val_split": 0.2,
-    "num_workers": 4
+    "num_workers": 4,
+    "model_s3_key": "outputs/checkpoints/localizer_od_fovea_best.pt"
 }
 
 # --- Logger wrapper for stdout ---

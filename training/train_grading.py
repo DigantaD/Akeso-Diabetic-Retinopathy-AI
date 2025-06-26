@@ -13,10 +13,9 @@ from agents.embedding_agent import load_encoder
 from utils.metrics import compute_metrics
 from utils.wandb_logger import WandBLogger
 from utils.model_uploader import upload_to_s3
+from dashboard.inference.s3_model_loader import download_model_from_s3
 
-# 📍 Dynamic tqdm position for multiprocessing
 tqdm_pos = int(os.getenv("TQDM_POS", 0))
-
 
 def train_one_epoch(model, loader, optimizer, loss_fn, device):
     model.train()
@@ -37,7 +36,6 @@ def train_one_epoch(model, loader, optimizer, loss_fn, device):
     metrics["loss"] = total_loss / len(loader)
     return metrics
 
-
 def evaluate(model, loader, loss_fn, device):
     model.eval()
     total_loss, all_preds, all_labels = 0, [], []
@@ -54,7 +52,6 @@ def evaluate(model, loader, loss_fn, device):
     metrics = compute_metrics(all_labels, all_preds)
     metrics["loss"] = total_loss / len(loader)
     return metrics, all_preds, all_labels
-
 
 def run_training_loop(cfg):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -80,8 +77,19 @@ def run_training_loop(cfg):
     encoder = load_encoder(cfg["encoder"], pretrained=True, freeze=cfg["freeze_encoder"])
     model = GradingModel(encoder).to(device)
 
+    # 🔁 Download pretrained model from S3 if not found
+    if not os.path.exists(cfg["save_path"]):
+        print(f"📥 No local model found. Downloading from S3 key: {cfg['model_s3_key']}")
+        s3_bucket = "akeso-eyecare"
+        os.makedirs(os.path.dirname(cfg["save_path"]), exist_ok=True)
+        download_model_from_s3(s3_bucket, cfg["model_s3_key"], cfg["save_path"])
+
+    if os.path.exists(cfg["save_path"]):
+        print(f"📦 Loading pretrained model from: {cfg['save_path']}")
+        model.load_state_dict(torch.load(cfg["save_path"], map_location=device))
+
     loss_fn = nn.CrossEntropyLoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
+    optimizer = torch.optim.AdamW(model.parameters(), lr=float(cfg["lr"]), weight_decay=cfg["weight_decay"])
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg["epochs"])
 
     best_f1 = 0
@@ -113,9 +121,7 @@ def run_training_loop(cfg):
     print(classification_report(labels, preds, digits=4))
 
     logger.finish()
-
     upload_to_s3(cfg["save_path"], cfg["save_path"])
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

@@ -12,8 +12,8 @@ from training.losses import localization_loss
 from training.scheduler import get_scheduler
 from utils.wandb_logger import WandBLogger
 from utils.model_uploader import upload_to_s3
+from dashboard.inference.s3_model_loader import download_model_from_s3
 
-# 📍 Device setup
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 tqdm_pos = int(os.getenv("TQDM_POS", 2))
 
@@ -93,8 +93,7 @@ def run_training_loop(cfg):
         localization_mode=cfg["localization_mode"]
     )["localization"]
 
-    val_split = cfg.get("val_split", 0.2)
-    val_len = int(len(dataset) * val_split)
+    val_len = int(len(dataset) * cfg.get("val_split", 0.2))
     train_len = len(dataset) - val_len
     train_ds, val_ds = random_split(dataset, [train_len, val_len])
 
@@ -107,9 +106,19 @@ def run_training_loop(cfg):
     scheduler = get_scheduler(optimizer, cfg)
     scaler = torch.cuda.amp.GradScaler() if cfg.get("amp", True) else None
 
-    best_val_error = float("inf")
     os.makedirs(cfg["output_dir"], exist_ok=True)
     best_ckpt_path = os.path.join(cfg["output_dir"], cfg["checkpoint_name"])
+
+    if not os.path.exists(best_ckpt_path):
+        print(f"📅 No local model found at {best_ckpt_path}. Downloading from S3: {cfg['model_s3_key']}")
+        s3_bucket = "akeso-eyecare"
+        download_model_from_s3(s3_bucket, cfg["model_s3_key"], best_ckpt_path)
+
+    if os.path.exists(best_ckpt_path):
+        print(f"📦 Loading model weights from {best_ckpt_path}")
+        model.load_state_dict(torch.load(best_ckpt_path, map_location=DEVICE))
+
+    best_val_error = float("inf")
 
     for epoch in tqdm(range(cfg["epochs"]), position=tqdm_pos, desc="[LOCALIZATION] Epoch", leave=True):
         print(f"\n[LOCALIZATION] 🌱 Epoch {epoch + 1}/{cfg['epochs']}")
@@ -137,11 +146,9 @@ def run_training_loop(cfg):
             scheduler.step()
 
     logger.finish()
-
     upload_to_s3(best_ckpt_path, best_ckpt_path)
 
-    # 🧹 Cleanup only temporary epoch_* folders inside outputs/
-    output_root = os.path.dirname(cfg["output_dir"])  # typically "outputs"
+    output_root = os.path.dirname(cfg["output_dir"])
     for item in os.listdir(output_root):
         item_path = os.path.join(output_root, item)
         if os.path.isdir(item_path) and item.startswith("epoch_"):
@@ -156,7 +163,7 @@ if __name__ == "__main__":
     config = {
         "image_size": (224, 224),
         "batch_size": 8,
-        "epochs": 100,
+        "epochs": 15,
         "lr": 1e-4,
         "lambda_align": 1.0,
         "lambda_clip": 0.5,
@@ -167,6 +174,7 @@ if __name__ == "__main__":
         "vlm_pretrained": "openai",
         "amp": True,
         "val_split": 0.2,
-        "num_workers": 4
+        "num_workers": 4,
+        "model_s3_key": "outputs/checkpoints/localizer_od_fovea_best.pt"
     }
     run_training_loop(config)

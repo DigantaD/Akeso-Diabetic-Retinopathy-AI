@@ -1,5 +1,3 @@
-# train_segmentation.py
-
 import os
 import yaml
 import torch
@@ -16,6 +14,7 @@ from training.scheduler import get_scheduler
 from utils.postprocess import save_predictions_to_disk
 from utils.wandb_logger import WandBLogger
 from utils.model_uploader import upload_to_s3
+from dashboard.inference.s3_model_loader import download_model_from_s3
 
 tqdm_pos = int(os.getenv("TQDM_POS", 1))
 CLASS_NAMES = ["MA", "HE", "EX", "SE", "OD"]
@@ -91,7 +90,7 @@ def evaluate(model, loader, epoch=0, log_masks=False, logger=None):
 def run_training_loop(cfg):
     print(f"📦 [SEGMENTATION] Using device: {device}")
     dataset = get_idrid_dataset(tasks=["segmentation"], mode="train")["segmentation"]
-    
+
     val_len = int(len(dataset) * cfg.get("val_split", 0.2))
     train_len = len(dataset) - val_len
     train_ds, val_ds = random_split(dataset, [train_len, val_len])
@@ -103,6 +102,20 @@ def run_training_loop(cfg):
         sam_ckpt_path=cfg["sam_ckpt_path"],
         model_type=cfg["sam_model_type"]
     ).to(device)
+
+    local_weight_path = cfg["save_path"]
+    s3_key = cfg.get("model_s3_key")
+
+    # 🔁 Download pretrained model from S3 if not found
+    if not os.path.exists(local_weight_path):
+        print(f"📥 No local checkpoint found. Downloading from S3 key: {s3_key}")
+        s3_bucket = "akeso-eyecare"
+        os.makedirs(os.path.dirname(local_weight_path), exist_ok=True)
+        download_model_from_s3(s3_bucket, s3_key, local_weight_path)
+
+    if os.path.exists(local_weight_path):
+        print(f"📦 Loading pretrained segmentation model from: {local_weight_path}")
+        model.load_state_dict(torch.load(local_weight_path, map_location=device))
 
     optimizer = optim.AdamW(model.parameters(), lr=float(cfg["lr"]))
     scheduler = get_scheduler(optimizer, cfg)

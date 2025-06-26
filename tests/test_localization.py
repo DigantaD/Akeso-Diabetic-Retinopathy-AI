@@ -9,7 +9,7 @@ def test_localization_model():
     cfg = {
         "image_size": (224, 224),
         "batch_size": 8,
-        "epochs": 100,
+        "epochs": 50,
         "lr": 1e-4,
         "lambda_align": 1.0,
         "lambda_clip": 0.5,
@@ -20,7 +20,8 @@ def test_localization_model():
         "vlm_pretrained": "openai",
         "amp": True,
         "val_split": 0.2,
-        "num_workers": 4
+        "num_workers": 4,
+        "model_s3_key": "outputs/checkpoints/localizer_od_fovea_best.pt"
     }
 
     best_ckpt_path = os.path.join(cfg["output_dir"], cfg["checkpoint_name"])
