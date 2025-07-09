@@ -33,18 +33,14 @@ st.markdown("""
     <hr style='margin-top: 20px;'>
 """, unsafe_allow_html=True)
 
-# Sidebar
+# === Sidebar ===
 user_role = get_user_role()
 show_legend = st.sidebar.checkbox("Show Overlay Legend", value=True)
 
-# 🧠 Inference Engine
+# === Unified Inference Engine ===
 inference_engine = InferenceRunner(
     s3_bucket="akeso-eyecare",
-    model_keys={
-        "grading": "outputs/checkpoints/grading.pt",
-        "segmentation": "outputs/checkpoints/segmentor.pt",
-        "localization": "outputs/checkpoints/localizer_od_fovea_best.pt"
-    }
+    model_key="outputs/checkpoints/dynamic_router.pt"
 )
 
 # 📤 Upload Block (Centered)
@@ -53,7 +49,7 @@ with col2:
     st.markdown("<h3 style='text-align: center;'>📤 Upload Retinal Image(s)</h3>", unsafe_allow_html=True)
     uploaded_files = upload_images()
 
-# 📊 Inference Results
+# 📊 Inference Results Display
 if uploaded_files:
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
@@ -62,6 +58,7 @@ if uploaded_files:
     for file in uploaded_files:
         name, image = file
         inference_results = inference_engine.infer_all(image)
+
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
             display_visuals(
