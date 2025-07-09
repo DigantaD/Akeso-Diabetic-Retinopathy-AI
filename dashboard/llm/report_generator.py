@@ -20,26 +20,31 @@ client = AzureOpenAI(
     api_version=AZURE_API_VERSION
 )
 
-def generate_llm_report(user_role: str, grade: str, lesions: str, location: str) -> str:
+def generate_llm_report(user_role: str, grade=None, lesions=None, location=None) -> str:
     prompt_template = PROMPT_TEMPLATES.get(user_role)
-    
     if not prompt_template:
         return f"⚠️ Unknown role '{user_role}'. Cannot generate report."
 
-    if not any([grade, lesions, location]):
-        return "⚠️ Insufficient data to generate a report."
+    # Apply graceful defaults
+    grade = grade or "not available"
+    lesions = lesions or "no specific lesions detected"
+    location = location or "not localized"
 
+    # Fill the prompt
     filled_prompt = prompt_template.format(
-        grade=grade or "Unknown",
-        lesions=lesions or "Not detected",
-        location=location or "Undetermined"
+        grade=grade,
+        lesions=lesions,
+        location=location
     )
 
     try:
         response = client.chat.completions.create(
             model=DEPLOYMENT_NAME,
             messages=[
-                {"role": "system", "content": "You are an expert AI medical assistant generating customized diagnostic summaries."},
+                {
+                    "role": "system",
+                    "content": "You are an expert AI medical assistant generating customized diagnostic summaries based on retina scan findings."
+                },
                 {"role": "user", "content": filled_prompt}
             ],
             temperature=0
@@ -56,38 +61,39 @@ def generate_llm_report(user_role: str, grade: str, lesions: str, location: str)
                 "\n\n### 📝 Summary Table\n"
                 "| Section         | Details                             |\n"
                 "|-----------------|--------------------------------------|\n"
-                f"| Disease Grade   | {grade or 'N/A'}                    |\n"
-                f"| Visual Issues   | {lesions or 'Minimal'}              |\n"
-                f"| Recommendation  | Routine checkup / follow-up advised |\n"
+                f"| Disease Grade   | {grade}                              |\n"
+                f"| Visual Findings | {lesions}                            |\n"
+                f"| Region Affected | {location}                           |\n"
+                "| Recommendation  | Routine follow-up and healthy habits|\n"
             )
         elif user_role == "Doctor":
             table = (
                 "\n\n### 🧾 Clinical Snapshot\n"
-                "| Parameter          | Observation                          |\n"
-                "|--------------------|---------------------------------------|\n"
-                f"| Grading Outcome    | {grade or 'N/A'}                      |\n"
-                f"| Lesions Observed   | {lesions or 'None detected'}          |\n"
-                f"| Affected Region    | {location or 'Central region'}        |\n"
-                f"| Suggested Focus    | Evaluate for NPDR/PDR staging         |\n"
+                "| Parameter          | Observation                       |\n"
+                "|--------------------|-----------------------------------|\n"
+                f"| Grading Outcome    | {grade}                           |\n"
+                f"| Lesions Observed   | {lesions}                         |\n"
+                f"| Affected Region    | {location}                        |\n"
+                f"| Suggested Focus    | DR staging / treatment planning   |\n"
             )
         elif user_role == "Clinician":
             table = (
                 "\n\n### 📊 Diagnostic Summary\n"
-                "| Metric                 | Value                               |\n"
-                "|------------------------|-------------------------------------|\n"
-                f"| DR Classification      | {grade or 'N/A'} (ICD: H35.0*)      |\n"
-                f"| Pathological Features  | {lesions or 'None'}                 |\n"
-                f"| Lesion Distribution    | {location or 'Undetermined'}        |\n"
-                f"| Recommended Follow-Up  | OCT + Systemic Evaluation           |\n"
+                "| Metric                 | Value                            |\n"
+                "|------------------------|----------------------------------|\n"
+                f"| DR Classification      | {grade} (ICD: H35.0*)             |\n"
+                f"| Pathological Features  | {lesions}                        |\n"
+                f"| Lesion Distribution    | {location}                       |\n"
+                f"| Recommended Follow-Up  | OCT + Systemic Evaluation        |\n"
             )
         else:
             table = (
                 "\n\n### 📝 Summary Table\n"
-                "| Section        | Details                        |\n"
-                "|----------------|-------------------------------|\n"
-                f"| Disease Grade  | {grade or 'N/A'}              |\n"
-                f"| Lesions Found  | {lesions or 'N/A'}            |\n"
-                f"| Affected Area  | {location or 'N/A'}           |\n"
+                "| Section        | Details                |\n"
+                "|----------------|------------------------|\n"
+                f"| Disease Grade  | {grade}                |\n"
+                f"| Lesions Found  | {lesions}              |\n"
+                f"| Affected Area  | {location}             |\n"
             )
 
         return explanation + table

@@ -3,94 +3,92 @@ import torch
 import numpy as np
 from PIL import Image
 from torchvision import transforms
+import yaml
 
-from models.grading_model import GradingModel
-from models.segmenter import AkesoSegmentationModel
-from models.localization_model import LocalizationModel
-from models.localization_vlm_module import VLMEmbedder
+from utils.model_loader import load_pretrained_model
 from dashboard.inference.s3_model_loader import download_model_from_s3
-from agents.embedding_agent import load_encoder
-
 
 class InferenceRunner:
-    def __init__(self, s3_bucket, model_keys, cache_dir="~/.akeso_cache"):
+    def __init__(self, s3_bucket, model_key, cache_dir="~/.akeso_cache", config_path="config/dynamic_config.yaml"):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.cache_dir = os.path.expanduser(cache_dir)
+        os.makedirs(self.cache_dir, exist_ok=True)
 
-        # 📥 Download model checkpoints
-        grading_path = download_model_from_s3(s3_bucket, model_keys["grading"], f"{self.cache_dir}/grading.pth")
-        segmentation_path = download_model_from_s3(s3_bucket, model_keys["segmentation"], f"{self.cache_dir}/segmentation.pth")
-        localization_path = download_model_from_s3(s3_bucket, model_keys["localization"], f"{self.cache_dir}/localization.pth")
+        # 🧾 Load config
+        with open(config_path) as f:
+            self.cfg = yaml.safe_load(f)
 
-        # 🧠 Grading Model
-        encoder = load_encoder("openclip-vit-b-16", pretrained=True, freeze=True)
-        self.grading_model = GradingModel(encoder).to(self.device)
-        self.grading_model.load_state_dict(torch.load(grading_path, map_location=self.device))
-        self.grading_model.eval()
+        # 📥 Download unified model checkpoint
+        self.checkpoint_path = os.path.join(self.cache_dir, "dynamic_router.pt")
+        print(f"📦 Model Location: {s3_bucket} / {model_key} → {self.checkpoint_path}")
+        download_model_from_s3(s3_bucket, model_key, self.checkpoint_path)
+        self.cfg["save_path"] = self.checkpoint_path
 
-        # 🧠 Segmentation Model
-        self.segmentation_model = AkesoSegmentationModel(
-            sam_ckpt_path="pretrained/sam_vit_b_01ec64.pth",
-            model_type="vit_b"
-        ).to(self.device)
-        self.segmentation_model.load_state_dict(torch.load(segmentation_path, map_location=self.device))
-        self.segmentation_model.eval()
+        # 🧠 Load unified Akeso model
+        self.model = load_pretrained_model(self.cfg).to(self.device)
 
-        # 🧠 Localization Model
-        self.localization_model = LocalizationModel(use_vlm_head=True).to(self.device)
-        self.localization_model.load_state_dict(torch.load(localization_path, map_location=self.device))
-        self.localization_model.eval()
+        state = torch.load(self.checkpoint_path, map_location=self.device)
+        self.model.load_state_dict(state.get("model_state_dict", state))
+        self.model.eval()
 
-        # 📎 VLM Embedder (optional, future)
-        self.vlm = VLMEmbedder(model_name="ViT-B-32", pretrained="openai").to(self.device)
-        self.vlm.eval()
-
-        # 🧼 Common Image Transform
-        self.transform = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor()
-        ])
-
+        # 🔖 Labels
+        self.grade_labels = ["No DR", "Mild", "Moderate", "Severe", "Proliferative"]
         self.segmentation_labels = [
             "Soft Exudates", "Microaneurysms", "Hard Exudates", "Hemorrhages", "Optic Disc"
         ]
 
-        self.grade_labels = ["No DR", "Mild", "Moderate", "Severe", "Proliferative"]
+        # 🌀 Preprocessing
+        img_size = 224 if self.cfg.get("encoder_name") == "openclip-vit-b-16" else self.cfg.get("image_size", 512)
+        self.transform = transforms.Compose([
+            transforms.Resize((img_size, img_size)),
+            transforms.ToTensor()
+        ])
 
     def preprocess(self, image: Image.Image):
-        return self.transform(image).unsqueeze(0).to(self.device)
+        return self.transform(image.convert("RGB")).unsqueeze(0).to(self.device)
 
-    def infer_all(self, image: Image.Image, caption: str = None):
+    def infer_all(self, image: Image.Image):
         x = self.preprocess(image)
 
         with torch.no_grad():
-            # 🎯 Grading
-            grading_logits = self.grading_model(x).cpu().numpy().flatten()
-            pred_idx = int(np.argmax(grading_logits))
-            confidence = float(grading_logits[pred_idx]) * 100
-            grading_result = (self.grade_labels[pred_idx], confidence)
+            predictions, routing_weights = self.model(x)
 
-            # 🧠 Segmentation
-            seg_logits = self.segmentation_model(x)  # shape [B, 5, H, W]
-            seg_probs = torch.sigmoid(seg_logits).cpu().numpy()[0]
-            segmentation_result = {
+        result = {}
+
+        # 🎯 Grading Prediction
+        if "grading" in predictions:
+            logits = predictions["grading"].cpu().numpy().flatten()
+            pred_idx = int(np.argmax(logits))
+            confidence = float(logits[pred_idx]) * 100
+            result["grading"] = {
+                "class": self.grade_labels[pred_idx],
+                "confidence_percent": round(confidence, 2)
+            }
+
+        # 🩸 Segmentation Mask
+        if "segmentation" in predictions:
+            seg_probs = torch.sigmoid(predictions["segmentation"]).cpu().numpy()[0]
+            result["segmentation"] = {
                 self.segmentation_labels[i]: (seg_probs[i] > 0.5).astype(np.uint8)
                 for i in range(len(self.segmentation_labels))
             }
 
-            # 📍 Localization
-            loc_out = self.localization_model(x)
-            od_coords = (loc_out["od"] * 224).cpu().numpy()[0]
-            fovea_coords = (loc_out["fovea"] * 224).cpu().numpy()[0]
-            localization_result = {
+        # 🧠 Localization Coordinates
+        if "localization" in predictions:
+            coords_np = (predictions["localization"] * self.cfg.get("image_size", 512)).cpu().numpy()[0]
+            result["localization"] = {
                 "points": {
-                    "optic_disc": tuple(od_coords.astype(int)),
-                    "fovea": tuple(fovea_coords.astype(int))
+                    "optic_disc": tuple(map(int, coords_np[:2])),
+                    "fovea": tuple(map(int, coords_np[2:]))
                 }
             }
 
-        return {
-            "grading": grading_result,
-            "segmentation": segmentation_result,
-            "localization": localization_result
-        }
+        # 🧭 Routing Weights
+        if routing_weights is not None:
+            result["routing_weights"] = {
+                "grading": float(routing_weights[:, 0]),
+                "segmentation": float(routing_weights[:, 1]),
+                "localization": float(routing_weights[:, 2])
+            }
+
+        return result
