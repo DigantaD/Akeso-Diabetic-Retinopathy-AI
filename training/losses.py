@@ -1,8 +1,12 @@
+# === losses.py ===
+
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# ✅ Dice Loss with optional class weights
+# === SEGMENTATION LOSSES ===
+
 def weighted_dice_loss(logits, targets, weights=None, smooth=1e-6):
     probs = torch.sigmoid(logits)
     intersection = (probs * targets).sum(dim=(2, 3))
@@ -12,28 +16,19 @@ def weighted_dice_loss(logits, targets, weights=None, smooth=1e-6):
         dice = dice * weights.view(1, -1)
     return (1 - dice).mean()
 
-# ✅ BCE Loss with optional class balancing
 def multilabel_bce_loss(logits, targets, pos_weight=None):
     bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     return bce(logits, targets)
 
-# ✅ Focal Loss with default fallback and optional class weights
 def focal_loss(logits, targets, alpha=None, gamma=2.0):
-    """
-    Multi-label focal loss for segmentation:
-    - logits, targets: [B, C, H, W]
-    """
-    bce = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')  # [B, C, H, W]
-    pt = torch.exp(-bce)  # pt = 1 - bce_loss
+    bce = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+    pt = torch.exp(-bce)
     focal = (1 - pt) ** gamma * bce
-
     if alpha is not None:
-        alpha = alpha.view(1, -1, 1, 1)  # [1, C, 1, 1]
+        alpha = alpha.view(1, -1, 1, 1)
         focal = alpha * focal
-
     return focal.mean()
 
-# ✅ Tversky Loss (highly effective for segmentation with class imbalance)
 def tversky_loss(y_pred, y_true, alpha=0.7, beta=0.3, smooth=1e-6):
     y_pred = torch.sigmoid(y_pred)
     TP = (y_pred * y_true).sum(dim=(2, 3))
@@ -42,43 +37,58 @@ def tversky_loss(y_pred, y_true, alpha=0.7, beta=0.3, smooth=1e-6):
     tversky = (TP + smooth) / (TP + alpha * FP + beta * FN + smooth)
     return 1 - tversky.mean()
 
-# ✅ Localization Loss with optional alignment and contrastive terms
-def localization_loss(
-    od_pred, fovea_pred, target_coords,
-    gnn_embed=None, clip_img=None, clip_txt=None,
-    λ_align=1.0, λ_clip=0.5,
-    align_loss_type="cosine"
-):
-    """
-    - od_pred, fovea_pred: B x 2
-    - target_coords: B x 2 x 2 (OD, Fovea)
-    - gnn_embed: B x D
-    - clip_img: B x D
-    - clip_txt: B x D
-    """
-    # Base regression loss
+# === LOCALIZATION LOSS ===
+
+def localization_loss(od_pred, fovea_pred, target_coords,
+                      gnn_embed=None, clip_img=None, clip_txt=None,
+                      λ_align=1.0, λ_clip=1.0):
     loss_fn = nn.SmoothL1Loss()
-    reg_loss = loss_fn(od_pred, target_coords[:, 0]) + loss_fn(fovea_pred, target_coords[:, 1])
+    target_od = target_coords[:, :2]
+    target_fovea = target_coords[:, 2:]
 
-    align_loss = 0.0
+    loss = loss_fn(od_pred, target_od) + loss_fn(fovea_pred, target_fovea)
+
+    # Optional: GNN vs CLIP image alignment
     if gnn_embed is not None and clip_img is not None:
-        if align_loss_type == "cosine":
-            align_loss = 1 - F.cosine_similarity(gnn_embed, clip_img, dim=1, eps=1e-6).mean()
-        else:
-            align_loss = F.mse_loss(gnn_embed, clip_img)
+        gnn_embed = F.normalize(gnn_embed, dim=1)
+        clip_img = F.normalize(clip_img, dim=1)
+        align_loss = 1 - F.cosine_similarity(gnn_embed, clip_img, dim=1).mean()
+        loss += λ_align * align_loss
 
-    clip_loss = 0.0
-    if clip_txt is not None and clip_img.norm(dim=1).min() > 1e-6:
-        img_norm = F.normalize(clip_img, dim=1)
-        txt_norm = F.normalize(clip_txt, dim=1)
-        logits = img_norm @ txt_norm.T  # B x B
-        labels = torch.arange(logits.size(0), device=logits.device)
-        clip_loss = (F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels)) / 2
+    # Optional: GNN vs CLIP text alignment
+    if clip_txt is not None:
+        clip_txt = F.normalize(clip_txt, dim=1)
+        txt_align_loss = 1 - F.cosine_similarity(gnn_embed, clip_txt, dim=1).mean()
+        loss += λ_clip * txt_align_loss
 
-    total_loss = reg_loss + λ_align * align_loss + λ_clip * clip_loss
-    return total_loss
+    return loss
 
-# ✅ Optional Loss Factory
+# === DYNAMIC SAFE LOSSES ===
+
+def segmentation_loss_fn(outputs, targets):
+    if targets is None or torch.all(targets == 0):
+        return torch.tensor(0.0, device=outputs.device, requires_grad=True)
+    bce = multilabel_bce_loss(outputs, targets)
+    dice = weighted_dice_loss(outputs, targets)
+    return 0.5 * bce + 0.5 * dice
+
+def grading_loss_fn(outputs, targets):
+    mask = targets != -1
+    if not mask.any():
+        return torch.tensor(0.0, device=outputs.device, requires_grad=True)
+    filtered_outputs = outputs[mask]
+    filtered_targets = targets[mask]
+    ce = nn.CrossEntropyLoss()
+    return ce(filtered_outputs, filtered_targets)
+
+def localization_loss_fn(outputs, targets):
+    if targets is None or targets.min() < 0:
+        return torch.tensor(0.0, device=outputs.device, requires_grad=True)
+    od_pred, fovea_pred = outputs[:, :2], outputs[:, 2:]
+    return localization_loss(od_pred, fovea_pred, targets)
+
+# === LOSS FACTORY (Optional) ===
+
 def get_loss(name, **kwargs):
     if name == "focal":
         return lambda outputs, targets: focal_loss(outputs, targets, **kwargs)
