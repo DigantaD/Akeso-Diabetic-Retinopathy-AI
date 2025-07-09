@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import open_clip
 from torchvision import transforms
-from PIL import Image
 
 class VLMEmbedder(nn.Module):
     def __init__(self, model_name="ViT-B-32", pretrained="openai", device="cuda"):
@@ -15,7 +14,7 @@ class VLMEmbedder(nn.Module):
         )
         self.tokenizer = open_clip.get_tokenizer(model_name)
 
-        self.model.eval()  # inference mode only
+        self.model.eval()
         for p in self.model.parameters():
             p.requires_grad = False
 

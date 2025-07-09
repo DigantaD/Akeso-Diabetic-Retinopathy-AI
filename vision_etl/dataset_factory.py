@@ -1,4 +1,3 @@
-from vision_etl.grading_loader import GradingLoader
 from vision_etl.dataset import IDRiDDataset, get_data_chamber
 from vision_etl.s3_loader import list_objects
 

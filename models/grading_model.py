@@ -13,4 +13,11 @@ class GradingModel(nn.Module):
 
     def forward(self, x):
         x = self.encoder(x)
+
+        # Handle CLIP / ViT / dict output safely
+        if isinstance(x, dict) and "pooler_output" in x:
+            x = x["pooler_output"]
+        elif isinstance(x, (list, tuple)):
+            x = x[0]
+
         return self.head(x)

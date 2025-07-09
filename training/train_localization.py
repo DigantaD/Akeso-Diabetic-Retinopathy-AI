@@ -1,4 +1,7 @@
+# training/train_localization.py
+
 import os
+import yaml
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -13,21 +16,28 @@ from training.scheduler import get_scheduler
 from utils.wandb_logger import WandBLogger
 from utils.model_uploader import upload_to_s3
 from dashboard.inference.s3_model_loader import download_model_from_s3
+from vision_etl.s3_loader import check_s3_key_exists
+from utils.safe_collate import localization_collate_fn
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 tqdm_pos = int(os.getenv("TQDM_POS", 2))
 
+
 def train_one_epoch(model, vlm, loader, optimizer, cfg, scaler=None):
     model.train()
     epoch_loss = 0
+    norm_factor = cfg["image_size"] if isinstance(cfg["image_size"], int) else cfg["image_size"][0]
 
-    for batch in tqdm(loader, desc="[LOCALIZATION] Training", position=tqdm_pos):
+    for batch in loader:
         images = batch["image"].to(DEVICE)
-        coords = batch["localization"]
+        coords = batch["localization"]  # [B, 4]
+        if not isinstance(coords, torch.Tensor):
+            coords = torch.tensor(coords, dtype=torch.float32)
+        coords = coords.to(DEVICE)
 
-        od_coords = torch.stack([coords["OD"][0], coords["OD"][1]], dim=1).float()
-        fovea_coords = torch.stack([coords["Fovea"][0], coords["Fovea"][1]], dim=1).float()
-        gt = torch.stack([od_coords, fovea_coords], dim=1).to(DEVICE) / cfg["image_size"][0]
+        od_coords = coords[:, :2] / norm_factor
+        fovea_coords = coords[:, 2:] / norm_factor
+        gt = torch.cat([od_coords, fovea_coords], dim=1)  # [B, 4]
 
         optimizer.zero_grad()
         with torch.cuda.amp.autocast(enabled=scaler is not None):
@@ -44,8 +54,8 @@ def train_one_epoch(model, vlm, loader, optimizer, cfg, scaler=None):
                 gnn_embed=gnn_embed,
                 clip_img=vlm_img,
                 clip_txt=vlm_txt,
-                λ_align=cfg["lambda_align"],
-                λ_clip=cfg["lambda_clip"]
+                λ_align=cfg["loss_weights"]["lambda_align"],
+                λ_clip=cfg["loss_weights"]["lambda_clip"]
             )
 
         if scaler:
@@ -60,28 +70,38 @@ def train_one_epoch(model, vlm, loader, optimizer, cfg, scaler=None):
 
     return epoch_loss / len(loader)
 
+
 def evaluate(model, loader, image_size):
     model.eval()
-    errors = []
+    all_od_errors, all_fovea_errors = [], []
+
+    norm_factor = image_size if isinstance(image_size, int) else image_size[0]
 
     with torch.no_grad():
-        for batch in tqdm(loader, desc="[LOCALIZATION] Validating", position=tqdm_pos):
+        for batch in loader:
             images = batch["image"].to(DEVICE)
-            coords = batch["localization"]
+            coords = batch["localization"]  # [B, 4]
+            if not isinstance(coords, torch.Tensor):
+                coords = torch.tensor(coords, dtype=torch.float32)
+            coords = coords.to(DEVICE)
 
-            od_coords = torch.stack([coords["OD"][0], coords["OD"][1]], dim=1).float()
-            fovea_coords = torch.stack([coords["Fovea"][0], coords["Fovea"][1]], dim=1).float()
-            gt = torch.stack([od_coords, fovea_coords], dim=1).to(DEVICE)
+            gt_od = coords[:, :2]
+            gt_fovea = coords[:, 2:]
 
             output = model(images)
-            od_pred = output["od"] * image_size[0]
-            fovea_pred = output["fovea"] * image_size[0]
-            pred_coords = torch.stack([od_pred, fovea_pred], dim=1)
+            pred_od = output["od"] * norm_factor
+            pred_fovea = output["fovea"] * norm_factor
 
-            dist = torch.norm(pred_coords - gt, dim=-1).mean().item()
-            errors.append(dist)
+            od_error = torch.norm(pred_od - gt_od, dim=-1)
+            fovea_error = torch.norm(pred_fovea - gt_fovea, dim=-1)
 
-    return sum(errors) / len(errors)
+            all_od_errors.append(od_error)
+            all_fovea_errors.append(fovea_error)
+
+    avg_od_error = torch.cat(all_od_errors).mean().item()
+    avg_fovea_error = torch.cat(all_fovea_errors).mean().item()
+    return {"od_error": avg_od_error, "fovea_error": avg_fovea_error}
+
 
 def run_training_loop(cfg):
     print(f"📦 [LOCALIZATION] Using device: {DEVICE}")
@@ -97,26 +117,47 @@ def run_training_loop(cfg):
     train_len = len(dataset) - val_len
     train_ds, val_ds = random_split(dataset, [train_len, val_len])
 
-    train_loader = DataLoader(train_ds, batch_size=cfg["batch_size"], shuffle=True, num_workers=cfg.get("num_workers", 4))
-    val_loader = DataLoader(val_ds, batch_size=cfg["batch_size"], shuffle=False, num_workers=cfg.get("num_workers", 4))
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=cfg["batch_size"],
+        shuffle=True,
+        num_workers=cfg.get("num_workers", 4),
+        collate_fn=localization_collate_fn
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=cfg["batch_size"],
+        shuffle=False,
+        num_workers=cfg.get("num_workers", 4),
+        collate_fn=localization_collate_fn
+    )
 
     model = LocalizationModel(use_vlm_head=True).to(DEVICE)
-    vlm = VLMEmbedder(model_name=cfg["vlm_model"], pretrained=cfg["vlm_pretrained"]).to(DEVICE)
+    vlm = VLMEmbedder(
+        model_name=cfg["model_config"]["vlm_model"],
+        pretrained=cfg["model_config"]["vlm_pretrained"]
+    ).to(DEVICE)
+
     optimizer = optim.AdamW(model.parameters(), lr=float(cfg["lr"]))
     scheduler = get_scheduler(optimizer, cfg)
     scaler = torch.cuda.amp.GradScaler() if cfg.get("amp", True) else None
 
-    os.makedirs(cfg["output_dir"], exist_ok=True)
-    best_ckpt_path = os.path.join(cfg["output_dir"], cfg["checkpoint_name"])
+    local_path = cfg["save_path"]
+    s3_key = cfg.get("model_s3_key")
+    s3_bucket = "akeso-eyecare"
 
-    if not os.path.exists(best_ckpt_path):
-        print(f"📅 No local model found at {best_ckpt_path}. Downloading from S3: {cfg['model_s3_key']}")
-        s3_bucket = "akeso-eyecare"
-        download_model_from_s3(s3_bucket, cfg["model_s3_key"], best_ckpt_path)
+    if s3_key and not os.path.exists(local_path):
+        if check_s3_key_exists(s3_key):
+            print(f"📥 Found checkpoint in S3 ({s3_key}). Downloading...")
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            download_model_from_s3(s3_bucket, s3_key, local_path)
+        else:
+            print("🆕 No previous weights found in S3. Starting from scratch.")
 
-    if os.path.exists(best_ckpt_path):
-        print(f"📦 Loading model weights from {best_ckpt_path}")
-        model.load_state_dict(torch.load(best_ckpt_path, map_location=DEVICE))
+    if os.path.exists(local_path):
+        print(f"📦 Loading model weights from: {local_path}")
+        state = torch.load(local_path, map_location=DEVICE)
+        model.load_state_dict(state["model_state_dict"] if "model_state_dict" in state else state)
 
     best_val_error = float("inf")
 
@@ -127,54 +168,21 @@ def run_training_loop(cfg):
         val_error = evaluate(model, val_loader, cfg["image_size"])
 
         print(f"[LOCALIZATION] 📉 Train Loss: {train_loss:.4f}")
-        print(f"[LOCALIZATION] ✅ Val Avg Error (px): {val_error:.2f}")
+        print(f"[LOCALIZATION] ✅ Val OD Error: {val_error['od_error']:.2f}px | Val Fovea Error: {val_error['fovea_error']:.2f}px")
 
         logger.log_metrics({
             "train/loss": train_loss,
-            "val/error": val_error
+            "val/od_error": val_error["od_error"],
+            "val/fovea_error": val_error["fovea_error"]
         }, step=epoch)
 
-        if val_error < best_val_error:
-            best_val_error = val_error
-            torch.save(model.state_dict(), best_ckpt_path)
-            print("[LOCALIZATION] 🟢 Best model checkpoint saved!")
-            logger.log_model_artifact(best_ckpt_path, name="localization_model")
+        if (val_error["od_error"] + val_error["fovea_error"]) < best_val_error:
+            best_val_error = val_error["od_error"] + val_error["fovea_error"]
+            torch.save({"model_state_dict": model.state_dict()}, local_path)
+            print("✅ New best model checkpoint saved.")
+            logger.log_model_artifact(local_path, name="localization_model")
 
-        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-            scheduler.step(train_loss)
-        else:
-            scheduler.step()
+        scheduler.step(train_loss if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau) else None)
 
     logger.finish()
-    upload_to_s3(best_ckpt_path, best_ckpt_path)
-
-    output_root = os.path.dirname(cfg["output_dir"])
-    for item in os.listdir(output_root):
-        item_path = os.path.join(output_root, item)
-        if os.path.isdir(item_path) and item.startswith("epoch_"):
-            try:
-                import shutil
-                shutil.rmtree(item_path)
-                print(f"[CLEANUP] Removed {item_path}")
-            except Exception as e:
-                print(f"⚠️ Failed to delete {item_path}: {e}")
-
-if __name__ == "__main__":
-    config = {
-        "image_size": (224, 224),
-        "batch_size": 8,
-        "epochs": 15,
-        "lr": 1e-4,
-        "lambda_align": 1.0,
-        "lambda_clip": 0.5,
-        "localization_mode": "point",
-        "output_dir": "outputs/checkpoints",
-        "checkpoint_name": "localizer_od_fovea_best.pt",
-        "vlm_model": "ViT-B-32",
-        "vlm_pretrained": "openai",
-        "amp": True,
-        "val_split": 0.2,
-        "num_workers": 4,
-        "model_s3_key": "outputs/checkpoints/localizer_od_fovea_best.pt"
-    }
-    run_training_loop(config)
+    upload_to_s3(local_path, s3_key or local_path)

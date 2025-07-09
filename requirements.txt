@@ -1,21 +1,41 @@
+# Core Torch libraries
 torch==2.1.0
 torchvision==0.16.0
 torchaudio==2.1.0
 
+# Computer Vision
 opencv-python==4.8.1.78
-scikit-learn==1.3.2
-matplotlib==3.8.2
-seaborn==0.13.2
-pandas==2.1.4
-PyYAML==6.0.1
-streamlit==1.33.0
-wandb==0.16.3
-networkx==3.2.1
+albumentations==1.3.1
 einops==0.7.0
 timm==0.9.12
-albumentations==1.3.1
 scipy==1.11.4
-boto3==1.34.19
-transformers==4.38.2
+Pillow==10.2.0
 
+# Transformers & NLP
+transformers==4.38.2
+sentencepiece==0.1.99
+protobuf==4.25.3  # For compatibility with transformers
+
+# Graphs
+networkx==3.2.1
+torch-geometric==2.4.0
+torch-scatter==2.1.2
+torch-sparse==0.6.18
+
+# ML and Utils
+scikit-learn==1.3.2
+pandas==2.1.4
+matplotlib==3.8.2
+seaborn==0.13.2
+PyYAML==6.0.1
+boto3==1.34.19
+
+# Streamlit & Logging
+streamlit==1.33.0
+wandb==0.16.3
+
+# Git Repos
 git+https://github.com/facebookresearch/detectron2.git
+
+# openclip-torch==2.23.0
+# huggingface-hub==0.21.4

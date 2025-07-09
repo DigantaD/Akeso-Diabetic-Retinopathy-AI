@@ -8,11 +8,19 @@ def display_visuals(file_data, user_role="Patient", show_legend=True, inference_
     st.markdown(f"**🖼️ Original Image: `{name}`**")
     st.image(image, caption="Original Retinal Image", use_container_width=True)
 
+    # 💡 Display routing weights if present
+    if inference_results and "routing_weights" in inference_results:
+        st.markdown("### 🔀 **Routing Probabilities**")
+        rw = inference_results["routing_weights"]
+        st.text(f"🧠 Grading: {rw['grading']:.2f}  |  🧠 Segmentation: {rw['segmentation']:.2f}  |  📍 Localization: {rw['localization']:.2f}")
+        st.info("The model automatically routed this image to relevant tasks based on visual features.")
+
+    # === INIT OUTPUTS ===
     grade_label = "Unknown"
     lesion_summary = "Not detected"
     region = "Unknown"
 
-    # 🎯 DISEASE GRADING
+    # === 🎯 GRADING ===
     if inference_results and "grading" in inference_results:
         pred_label, confidence = inference_results["grading"]
         grade_label = pred_label
@@ -20,7 +28,7 @@ def display_visuals(file_data, user_role="Patient", show_legend=True, inference_
     else:
         st.markdown("🎯 **Disease Grade**: *Unavailable*")
 
-    # 🧠 SEGMENTATION COMPOSITE OVERLAY
+    # === 🧠 SEGMENTATION ===
     if inference_results and "segmentation" in inference_results:
         lesion_masks = inference_results["segmentation"]
         present_lesions = [label for label, mask in lesion_masks.items() if np.sum(mask) > 100]
@@ -32,20 +40,22 @@ def display_visuals(file_data, user_role="Patient", show_legend=True, inference_
     else:
         st.markdown("🧠 **Lesion Masks**: *Unavailable*")
 
-    # 📍 LOCALIZATION
+    # === 📍 LOCALIZATION ===
     if inference_results and "localization" in inference_results:
         st.markdown("📍 **Localization**")
 
-        if "points" in inference_results["localization"]:
-            points = inference_results["localization"]["points"]
-            loc_img = image.copy()
-            draw = ImageDraw.Draw(loc_img)
-            if "fovea" in points:
-                f = points["fovea"]
-                draw.ellipse((f[0]-5, f[1]-5, f[0]+5, f[1]+5), fill='red')
-            if "optic_disc" in points:
-                d = points["optic_disc"]
-                draw.ellipse((d[0]-5, d[1]-5, d[0]+5, d[1]+5), fill='blue')
+        loc_img = image.copy()
+        draw = ImageDraw.Draw(loc_img)
+
+        points = inference_results["localization"].get("points", {})
+        if "fovea" in points:
+            f = points["fovea"]
+            draw.ellipse((f[0]-5, f[1]-5, f[0]+5, f[1]+5), fill='red')
+        if "optic_disc" in points:
+            d = points["optic_disc"]
+            draw.ellipse((d[0]-5, d[1]-5, d[0]+5, d[1]+5), fill='blue')
+
+        if points:
             st.image(loc_img, caption="Fovea (🔴) and Disc (🔵) Overlay", use_container_width=True)
 
             dx = points["fovea"][0] - points["optic_disc"][0]
@@ -61,9 +71,11 @@ def display_visuals(file_data, user_role="Patient", show_legend=True, inference_
             for label, heatmap in inference_results["localization"]["heatmaps"].items():
                 st.image(heatmap, caption=f"{label} Heatmap", use_container_width=True)
 
-    if show_legend:
+    # === LEGEND (Conditional) ===
+    if show_legend and ("segmentation" in inference_results or "localization" in inference_results):
         st.markdown("**Legend**: 🧠 Lesions - 🟡 SE, 🔴 MA, 🔵 HE, 🟢 HR, 🟠 Disc | 📍 Fovea (🔴), Optic Disc (🔵)")
 
+    # === 🧾 LLM REPORT ===
     with st.expander("📄 LLM Report", expanded=True):
         st.markdown(f"*(Role: {user_role})*")
         with st.spinner("Generating medical explanation..."):

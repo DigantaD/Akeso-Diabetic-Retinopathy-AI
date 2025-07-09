@@ -1,0 +1,47 @@
+batch_size: 16
+epochs: 5
+cycle_number: 5
+warmup_epochs: 0
+
+# Model checkpointing
+save_path: outputs/checkpoints/dynamic_router.pt  # Required in test_dynamic_model
+model_s3_key: outputs/checkpoints/dynamic_router.pt
+
+# Checkpoints for individual tasks
+grading_ckpt: outputs/checkpoints/grading.pt
+segmentation_ckpt: outputs/checkpoints/segmentor.pt
+localization_ckpt: outputs/checkpoints/localizer_od_fovea_best.pt
+
+# SAM encoder
+sam_ckpt_path: pretrained/sam_vit_b_01ec64.pth
+sam_model_type: vit_b
+
+# Encoder base
+encoder_name: openclip-vit-b-16
+
+# Optimization
+learning_rate: 5e-5
+weight_decay: 1e-5
+
+# Loss weights
+loss_weights:
+  grading: 0.28
+  segmentation: 0.3
+  localization: 0.42
+  entropy: 0.01
+
+# Temperature scheduling
+start_temperature: 5.0
+min_temperature: 0.5
+temperature_anneal_epochs: 10
+
+# Validation split
+use_val_split: true
+val_split: 0.2
+
+# Logging
+wandb_project: akeso-eyecare
+wandb_run_name: router-training
+
+# Saving
+save_every: 5

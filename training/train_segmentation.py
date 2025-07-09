@@ -5,6 +5,8 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
+import boto3
+from botocore.exceptions import ClientError
 
 from vision_etl.dataset_factory import get_idrid_dataset
 from models.segmenter import AkesoSegmentationModel
@@ -15,21 +17,20 @@ from utils.postprocess import save_predictions_to_disk
 from utils.wandb_logger import WandBLogger
 from utils.model_uploader import upload_to_s3
 from dashboard.inference.s3_model_loader import download_model_from_s3
+from vision_etl.s3_loader import check_s3_key_exists
+from utils.safe_collate import segmentation_collate_fn
 
 tqdm_pos = int(os.getenv("TQDM_POS", 1))
 CLASS_NAMES = ["MA", "HE", "EX", "SE", "OD"]
 
-with open("config/segmentation_config.yaml", "r") as f:
-    cfg = yaml.safe_load(f)
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def train_one_epoch(model, loader, optimizer, scaler=None):
+def train_one_epoch(cfg, model, loader, optimizer, scaler=None):
     model.train()
     epoch_loss = 0
-    for batch in tqdm(loader, desc="[SEGMENTATION] Training", position=tqdm_pos):
+    for batch in loader:
         images = batch["image"].to(device)
-        masks = batch["segmentation_mask"].to(device)
+        masks = batch["segmentation"].to(device)
 
         optimizer.zero_grad()
         with torch.cuda.amp.autocast(enabled=scaler is not None):
@@ -62,9 +63,9 @@ def evaluate(model, loader, epoch=0, log_masks=False, logger=None):
     images_to_log = []
 
     with torch.no_grad():
-        for batch_idx, batch in enumerate(tqdm(loader, desc="[SEGMENTATION] Validating", position=tqdm_pos)):
+        for batch_idx, batch in enumerate(loader):
             images = batch["image"].to(device)
-            masks = batch["segmentation_mask"].to(device)
+            masks = batch["segmentation"].to(device)
             logits = model(images)
             probs = torch.sigmoid(logits)
             metrics = compute_segmentation_metrics(probs, masks, threshold=0.5)
@@ -95,40 +96,49 @@ def run_training_loop(cfg):
     train_len = len(dataset) - val_len
     train_ds, val_ds = random_split(dataset, [train_len, val_len])
 
-    train_loader = DataLoader(train_ds, batch_size=cfg["batch_size"], shuffle=True, num_workers=cfg.get("num_workers", 4), pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=cfg["batch_size"], shuffle=False, num_workers=cfg.get("num_workers", 4), pin_memory=True)
+    train_loader = DataLoader(
+        train_ds, batch_size=cfg["batch_size"], shuffle=True,
+        num_workers=cfg.get("num_workers", 4), pin_memory=True, collate_fn=segmentation_collate_fn
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=cfg["batch_size"], shuffle=False,
+        num_workers=cfg.get("num_workers", 4), pin_memory=True, collate_fn=segmentation_collate_fn
+    )
 
     model = AkesoSegmentationModel(
-        sam_ckpt_path=cfg["sam_ckpt_path"],
-        model_type=cfg["sam_model_type"]
+        sam_ckpt_path=cfg["model_config"]["sam_ckpt_path"],
+        model_type=cfg["model_config"]["sam_model_type"]
     ).to(device)
 
-    local_weight_path = cfg["save_path"]
+    local_path = cfg["save_path"]
     s3_key = cfg.get("model_s3_key")
+    s3_bucket = "akeso-eyecare"
 
-    # 🔁 Download pretrained model from S3 if not found
-    if not os.path.exists(local_weight_path):
-        print(f"📥 No local checkpoint found. Downloading from S3 key: {s3_key}")
-        s3_bucket = "akeso-eyecare"
-        os.makedirs(os.path.dirname(local_weight_path), exist_ok=True)
-        download_model_from_s3(s3_bucket, s3_key, local_weight_path)
+    if s3_key and not os.path.exists(local_path):
+        if check_s3_key_exists(s3_key):
+            print(f"📥 Found checkpoint in S3 ({s3_key}). Downloading...")
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            download_model_from_s3(s3_bucket, s3_key, local_path)
+        else:
+            print("🆕 No previous weights found in S3. Starting from scratch.")
 
-    if os.path.exists(local_weight_path):
-        print(f"📦 Loading pretrained segmentation model from: {local_weight_path}")
-        model.load_state_dict(torch.load(local_weight_path, map_location=device))
-
+    if os.path.exists(local_path):
+        print(f"📦 Loading pretrained model from: {local_path}")
+        state = torch.load(local_path, map_location=device)
+        model.load_state_dict(state["model_state_dict"] if "model_state_dict" in state else state)
+        
     optimizer = optim.AdamW(model.parameters(), lr=float(cfg["lr"]))
     scheduler = get_scheduler(optimizer, cfg)
     scaler = torch.cuda.amp.GradScaler() if cfg.get("amp", True) else None
 
     logger = WandBLogger(task_name="segmentation", cfg=cfg, mode="train")
     best_dice = 0.0
-    global_step = 0  # 🔁 Monotonic global step counter
+    global_step = 0
 
     for epoch in tqdm(range(cfg["epochs"]), position=tqdm_pos, desc="[SEGMENTATION] Epoch", leave=True):
         print(f"\n[SEGMENTATION] 🌱 Epoch {epoch+1}/{cfg['epochs']}")
 
-        train_loss = train_one_epoch(model, train_loader, optimizer, scaler)
+        train_loss = train_one_epoch(cfg, model, train_loader, optimizer, scaler)
         dice, iou = evaluate(model, val_loader, epoch=global_step, log_masks=True, logger=logger)
 
         print(f"[SEGMENTATION] 🔹 Train Loss: {train_loss:.4f}")
@@ -138,9 +148,9 @@ def run_training_loop(cfg):
         mean_dice = sum(dice) / len(dice)
         if mean_dice > best_dice:
             best_dice = mean_dice
-            torch.save(model.state_dict(), cfg["save_path"])
-            print("[SEGMENTATION] ✅ Model checkpoint saved!")
-            logger.log_model_artifact(cfg["save_path"], name="segmentation_model")
+            torch.save({"model_state_dict": model.state_dict()}, local_path)
+            print("✅ New best model saved.")
+            logger.log_model_artifact(local_path, name="segmentation_model")
 
         logger.log_metrics({
             "train/loss": train_loss,
@@ -158,11 +168,7 @@ def run_training_loop(cfg):
         if (epoch + 1) % cfg.get("save_interval", 10) == 0:
             save_predictions_to_disk(model, val_loader, f"outputs/epoch_{epoch+1}", device)
 
-        global_step += 1  # 🔁 Increment global step at the end of each epoch
+        global_step += 1
 
     logger.finish()
-
-    upload_to_s3(cfg["save_path"], cfg["save_path"])
-
-if __name__ == "__main__":
-    run_training_loop(cfg)
+    upload_to_s3(local_path, s3_key or local_path)

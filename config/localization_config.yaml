@@ -1,0 +1,18 @@
+amp: true
+batch_size: 8
+cycle_number: 5
+epochs: 10
+image_size: 512
+localization_mode: point
+loss_weights:
+  lambda_align: 1.0
+  lambda_clip: 0.5
+lr: 1e-4
+model_config:
+  vlm_model: ViT-B-32
+  vlm_pretrained: openai
+model_s3_key: outputs/checkpoints/localizer_od_fovea_best.pt
+num_workers: 4
+save_path: outputs/checkpoints/localizer_od_fovea_best.pt
+val_split: 0.2
+weight_decay: 0.01

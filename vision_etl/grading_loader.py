@@ -1,3 +1,4 @@
+import os
 from vision_etl.s3_loader import load_csv_from_s3
 
 class GradingLoader:
@@ -11,8 +12,12 @@ class GradingLoader:
         # Clean up column names
         self.label_df.columns = [col.strip() for col in self.label_df.columns]
 
-        # Ensure image names are clean
-        self.label_df["Image name"] = self.label_df["Image name"].astype(str).str.strip()
+        # Normalize image names
+        self.label_df["Image name"] = (
+            self.label_df["Image name"]
+            .astype(str)
+            .str.strip()
+        )
 
         # Build a mapping: image_id → grade
         self.label_map = {
@@ -32,6 +37,6 @@ class GradingLoader:
     def get_all_image_ids(self):
         """
         Returns:
-            List[str]: All image IDs present in the grading CSV
+            List[str]: All normalized image IDs present in the grading CSV
         """
         return list(self.label_map.keys())
