@@ -1,28 +1,28 @@
-image_size: 512
-batch_size: 6
-epochs: 50
-lr: 1e-4
-val_split: 0.2
-num_workers: 4
 amp: true
-save_interval: 5
-
+batch_size: 6
+cycle_number: 5
+epochs: 10
+image_size: 512
+loss_weights:
+  bce: 0.5
+  dice: 0.5
+lr: 1e-4
 lr_scheduler:
-  type: cosine         # Options: "cosine", "plateau"
   plateau:
-    mode: "min"
+    cooldown: 0
     factor: 0.5
+    min_lr: 1e-6
+    mode: min
     patience: 5
     threshold: 0.0001
-    cooldown: 0
-    min_lr: 1e-6
     verbose: true
-
-loss_weights:
-  dice: 0.5
-  bce: 0.5
-
-sam_ckpt_path: pretrained/sam_vit_b_01ec64.pth
-sam_model_type: vit_b
-save_path: "outputs/checkpoints/segmentor.pt"
-model_s3_key: "outputs/checkpoints/segmentor.pt"
+  type: cosine
+model_config:
+  sam_ckpt_path: pretrained/sam_vit_b_01ec64.pth
+  sam_model_type: vit_b
+model_s3_key: outputs/checkpoints/segmentor.pt
+num_workers: 4
+save_interval: 5
+save_path: outputs/checkpoints/segmentor.pt
+val_split: 0.2
+weight_decay: 0.01

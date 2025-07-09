@@ -1,16 +1,15 @@
+amp: true
 batch_size: 16
-epochs: 50
+cycle_number: 5
+epochs: 10
+image_size: 512
 lr: 1e-5
-weight_decay: 0.01
-
-encoder: "openclip-vit-b-16"
-freeze_encoder: true
-
-image_size: 224
-save_path: "outputs/checkpoints/grading.pt"
-
-# New
-val_split: 0.2
+model_config:
+  encoder: openclip-vit-b-16
+  freeze_encoder: true
+model_s3_key: outputs/checkpoints/grading.pt
+num_workers: 4
+save_path: outputs/checkpoints/grading.pt
 use_val_split: true
-
-model_s3_key: "outputs/checkpoints/grading.pt"
+val_split: 0.2
+weight_decay: 0.01

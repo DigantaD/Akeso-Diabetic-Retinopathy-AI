@@ -1,0 +1,41 @@
+schedule:
+  - cycle: 1
+    phase_a:
+      epochs: 30
+    phase_b:
+      epochs: 20
+      warmup: 5
+    phase_c:
+      alphas: [0.36, 0.34, 0.30]  # Initial equal-ish focus, higher grading
+
+  - cycle: 2
+    phase_a:
+      epochs: 30
+    phase_b:
+      epochs: 20
+    phase_c:
+      alphas: [0.34, 0.33, 0.33]  # Balanced emphasis for maturity
+
+  - cycle: 3
+    phase_a:
+      epochs: 20
+    phase_b:
+      epochs: 10
+    phase_c:
+      alphas: [0.32, 0.33, 0.35]  # Gradual shift to localization
+
+  - cycle: 4
+    phase_a:
+      epochs: 20
+    phase_b:
+      epochs: 10
+    phase_c:
+      alphas: [0.30, 0.32, 0.38]  # Increased localization focus
+
+  - cycle: 5
+    phase_a:
+      epochs: 10
+    phase_b:
+      epochs: 5
+    phase_c:
+      alphas: [0.28, 0.30, 0.42]  # Final phase: localization-centric
