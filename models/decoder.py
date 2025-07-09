@@ -31,21 +31,29 @@ class UpBlock(nn.Module):
         return self.conv(x)
 
 class DecoderUNetPlusPlus(nn.Module):
-    def __init__(self, in_chs=[256, 512, 1024], feat_keys=["feat3", "feat6", "feat9"], gnn_ch=256, out_ch=5):
+    def __init__(
+        self,
+        in_chs,               # List of input channels from encoder features
+        decoder_channels,     # List of decoder channels at each stage
+        gnn_in_ch,            # Channels from GNN input
+        gnn_out_ch,           # Channels after GNN fusion
+        feat_keys,            # Keys for feature map dictionary
+        out_ch                # Final output channels
+    ):
         super().__init__()
         self.feat_keys = feat_keys
 
-        self.conv_low = ConvBlock(in_chs[0], 256)    # e.g., feat3 or feat1
-        self.conv_mid = ConvBlock(in_chs[1], 512)    # e.g., feat6 or feat3
-        self.conv_high = ConvBlock(in_chs[2], 1024)  # e.g., feat9 or feat5
+        self.conv_low = ConvBlock(in_chs[0], decoder_channels[0])
+        self.conv_mid = ConvBlock(in_chs[1], decoder_channels[1])
+        self.conv_high = ConvBlock(in_chs[2], decoder_channels[2])
 
-        self.up1 = UpBlock(1024 + 512, 512)
-        self.up2 = UpBlock(512 + 256, 256)
+        self.up1 = UpBlock(decoder_channels[2] + decoder_channels[1], decoder_channels[1])
+        self.up2 = UpBlock(decoder_channels[1] + decoder_channels[0], decoder_channels[0])
 
-        self.gnn_fuse = nn.Conv2d(64, 256, kernel_size=1)
+        self.gnn_fuse = nn.Conv2d(gnn_in_ch, gnn_out_ch, kernel_size=1)
 
         self.final = nn.Sequential(
-            nn.Conv2d(256 + 256, 64, kernel_size=3, padding=1),
+            nn.Conv2d(decoder_channels[0] + gnn_out_ch, 64, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(64, out_ch, kernel_size=1)
         )
