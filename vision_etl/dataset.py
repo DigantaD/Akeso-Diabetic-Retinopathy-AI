@@ -1,8 +1,8 @@
-import os
+import os, re
 import torch
 import numpy as np
 from torch.utils.data import Dataset
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
 
 from vision_etl.grading_loader import GradingLoader
 from vision_etl.segmentation_loader import SegmentationLoader
@@ -21,22 +21,21 @@ SEG_CLASS_INFO = {
 class IDRiDDataset(Dataset):
     def __init__(self, tasks, data_chamber, mode="train", image_ids=None,
                  image_size=(224, 224), localization_mode="point"):
-
         self.tasks = tasks
         self.mode = mode
         self.image_size = image_size
+        self.localization_mode = localization_mode
         self.transforms = get_advanced_transforms(image_size=image_size)
 
         self.grading_loader = None
         self.seg_loader = None
         self.loc_loader = None
 
-        # Initialize grading loader (may be needed to fetch image_ids)
         if "grading" in tasks:
             grading_csv_key = data_chamber["grading"]["groundtruths"][mode]
             self.grading_loader = GradingLoader(grading_csv_key)
 
-        # Determine image source prefix and resolve image_keys from S3
+        # Determine image source (pick from available task)
         if "grading" in tasks:
             image_source = data_chamber["grading"]["original"][mode]
         elif "segmentation" in tasks:
@@ -46,28 +45,41 @@ class IDRiDDataset(Dataset):
         else:
             raise ValueError(f"No valid task found in tasks={tasks} for image source resolution.")
 
-        if isinstance(image_source, list):
-            self.image_keys = image_source
-        elif isinstance(image_source, str):
-            self.image_keys = list_image_keys_from_s3_prefix(image_source)
-        else:
-            raise ValueError(f"Invalid type for image_source: {type(image_source)}")
+        self.image_keys = (
+            image_source if isinstance(image_source, list)
+            else list_image_keys_from_s3_prefix(image_source)
+        )
 
-        # Determine image_ids
-        if image_ids is None and self.grading_loader:
-            image_ids = self.grading_loader.get_all_image_ids()
-        elif isinstance(image_ids, (set, dict)):
-            image_ids = list(image_ids)
-        elif image_ids is None:
-            image_ids = [
+        # Get image_ids from each task
+        self.grading_ids = self.grading_loader.get_all_image_ids() if self.grading_loader else []
+
+        self.segmentation_ids = []
+        if "segmentation" in tasks:
+            seg_image_keys = list_image_keys_from_s3_prefix(data_chamber["segmentation"]["original"][mode])
+            self.segmentation_ids = [
                 os.path.splitext(os.path.basename(k))[0]
-                for k in self.image_keys
+                for k in seg_image_keys
             ]
 
+        self.localization_ids = []
+        if "localization" in tasks:
+            loc_image_keys = list_image_keys_from_s3_prefix(data_chamber["localization"]["original"][mode])
+            self.localization_ids = [
+                os.path.splitext(os.path.basename(k))[0]
+                for k in loc_image_keys
+            ]
+
+        # Combine all available unique IDs across tasks
+        all_ids = set(self.grading_ids) | set(self.segmentation_ids) | set(self.localization_ids)
+
+        # Ensure the image file actually exists
         valid_image_ids = []
-        for image_id in image_ids:
-            match = next((k for k in self.image_keys
-                          if os.path.splitext(os.path.basename(k))[0].lower() == image_id.lower()), None)
+        for image_id in all_ids:
+            match = next(
+                (k for k in self.image_keys
+                 if os.path.splitext(os.path.basename(k))[0].lower() == image_id.lower()),
+                None
+            )
             if match:
                 valid_image_ids.append(image_id)
             else:
@@ -75,7 +87,7 @@ class IDRiDDataset(Dataset):
 
         self.image_ids = sorted(valid_image_ids)
 
-        # Initialize segmentation loader
+        # Loaders for Segmentation and Localization
         if "segmentation" in self.tasks:
             lesion_keys_dict = {
                 lesion_code: list_image_keys_from_s3_prefix(data_chamber["segmentation"]["groundtruths"][mode][lesion_code])
@@ -83,7 +95,6 @@ class IDRiDDataset(Dataset):
             }
             self.seg_loader = SegmentationLoader(lesion_keys_dict, img_size=image_size)
 
-        # Initialize localization loader
         if "localization" in self.tasks:
             od_csv_key, fovea_csv_key = data_chamber["localization"]["groundtruths"][mode]
             self.loc_loader = LocalizationLoader(
@@ -92,6 +103,12 @@ class IDRiDDataset(Dataset):
                 output=localization_mode,
                 image_size=image_size
             )
+
+        print(f"\n📦 IDRiDDataset Summary")
+        print(f"Mode: {mode} | Tasks: {tasks}")
+        print(f"Total Image IDs: {len(self.image_ids)}")
+        print(f"Grading IDs: {len(self.grading_ids)} | Segmentation IDs: {len(self.segmentation_ids)} | Localization IDs: {len(self.localization_ids)}")
+        print(f"Combined Valid IDs: {len(self.image_ids)}\n")
 
     def __len__(self):
         return len(self.image_ids)
@@ -104,47 +121,79 @@ class IDRiDDataset(Dataset):
             None
         )
         if image_key is None:
-            raise ValueError(f"Image not found for ID: {image_id}")
+            print(f"❌ Image key not found for ID: {image_id}")
+            return None
 
-        # Safely attempt to load image
         try:
             img_bytes = load_image_from_s3(image_key)
             img = Image.open(img_bytes).convert("RGB")
             img_np = np.array(img)
-        except (UnidentifiedImageError, OSError) as e:
-            print(f"❌ Unidentified or corrupted image for ID {image_id}: {e}")
-            # Retry next image safely
-            return self.__getitem__((idx + 1) % len(self))
-
-        if img_np.dtype != np.uint8:
-            img_np = (img_np * 255).astype(np.uint8)
-
-        transformed = self.transforms(image=img_np)
-        img_tensor = transformed["image"]
+            if img_np.dtype != np.uint8:
+                img_np = (img_np * 255).astype(np.uint8)
+            transformed = self.transforms(image=img_np)
+            img_tensor = transformed["image"]
+        except Exception as e:
+            print(f"❌ Image load/transform failed for {image_id}: {e}")
+            return None
 
         sample = {
             "image": img_tensor,
             "image_id": image_id
         }
 
-        if "grading" in self.tasks and self.grading_loader:
-            sample["label"] = self.grading_loader.get_label(image_id)
+        if "grading" in self.tasks and self.grading_loader and image_id in self.grading_ids:
+            try:
+                label = self.grading_loader.get_label(image_id)
+                sample["grading"] = torch.tensor(label, dtype=torch.long)
+            except Exception as e:
+                print(f"❌ Grading label fetch failed for {image_id}: {e}")
+                sample["grading"] = torch.tensor(-1, dtype=torch.long)
+            # print(f"Grading: {image_id}, {sample['grading'].sum()}")
+        else:
+            sample["grading"] = torch.tensor(-1, dtype=torch.long)
 
-        if "segmentation" in self.tasks and self.seg_loader:
-            mask_tensor = self.seg_loader.get_mask(image_id)
-            if mask_tensor is not None:
-                if mask_tensor.shape[0] != 5:
-                    padded = torch.zeros((5, *mask_tensor.shape[1:]), dtype=torch.float32)
-                    padded[:mask_tensor.shape[0]] = mask_tensor
-                    mask_tensor = padded
-                sample["segmentation_mask"] = mask_tensor
-            else:
-                sample["segmentation_mask"] = torch.zeros(
-                    (5, self.image_size[0], self.image_size[1]), dtype=torch.float32
-                )
+        if "segmentation" in self.tasks and self.seg_loader and image_id in self.segmentation_ids:
+            try:
+                mask_tensor = self.seg_loader.get_mask(image_id)
+                if mask_tensor is not None and mask_tensor.shape[0] == 5:
+                    sample["segmentation"] = mask_tensor
+                else:
+                    sample["segmentation"] = torch.zeros((5, self.image_size[0], self.image_size[1]), dtype=torch.float32)
+            except Exception as e:
+                print(f"❌ Segmentation mask fetch failed for {image_id}: {e}")
+                sample["segmentation"] = torch.zeros((5, self.image_size[0], self.image_size[1]), dtype=torch.float32)
+            # print(f"Segmentation: {image_id}, {sample['segmentation'].sum()}")
+        else:
+            sample["segmentation"] = torch.zeros((5, self.image_size[0], self.image_size[1]), dtype=torch.float32)
 
-        if "localization" in self.tasks and self.loc_loader:
-            sample["localization"] = self.loc_loader.get(image_id)
+        if "localization" in self.tasks and self.loc_loader and image_id in self.localization_ids:
+            try:
+                coords_data = self.loc_loader.get(image_id)
+
+                if isinstance(coords_data, dict):
+                    od = coords_data.get("OD")
+                    fovea = coords_data.get("Fovea")
+                    if od is None or fovea is None:
+                        raise ValueError("Missing OD or Fovea")
+                    coords = list(od) + list(fovea)
+                    sample["localization"] = torch.tensor(coords, dtype=torch.float32)
+                elif isinstance(coords_data, torch.Tensor) and coords_data.shape[-1] == 4:
+                    sample["localization"] = coords_data.float()
+                else:
+                    raise ValueError(f"Unexpected localization format for {image_id}: {type(coords_data)}")
+            except Exception as e:
+                print(f"❌ Localization fetch failed for {image_id}: {e}")
+                sample["localization"] = torch.tensor([-1.0, -1.0, -1.0, -1.0], dtype=torch.float32)
+            # print(f"Localization: {image_id}, {sample['localization'].sum()}")
+        else:
+            sample["localization"] = torch.tensor([-1.0, -1.0, -1.0, -1.0], dtype=torch.float32)
+
+        valid_tasks = {
+            "grading": image_id in self.grading_ids,
+            "segmentation": image_id in self.segmentation_ids,
+            "localization": image_id in self.localization_ids
+        }
+        sample["valid_tasks"] = valid_tasks
 
         return sample
 

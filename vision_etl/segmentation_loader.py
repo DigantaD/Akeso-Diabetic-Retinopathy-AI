@@ -1,10 +1,9 @@
 import cv2
 import numpy as np
 import torch
+from PIL import Image
 from vision_etl.s3_loader import load_image_from_s3
 import os
-from PIL import Image
-
 
 class SegmentationLoader:
     def __init__(self, lesion_keys_dict, img_size=(384, 384)):
@@ -15,20 +14,41 @@ class SegmentationLoader:
         """
         self.lesion_keys_dict = lesion_keys_dict
         self.img_size = img_size
+        self.image_ids = self._build_image_ids()
+
+    def _build_image_ids(self):
+        """
+        Collects and normalizes unique image IDs from all lesion mask keys.
+        """
+        ids = set()
+        for lesion_code, keys in self.lesion_keys_dict.items():
+            for k in keys:
+                try:
+                    ids.add(k)
+                except ValueError:
+                    continue
+        return sorted(list(ids))
 
     def get_mask(self, image_id: str):
+        """
+        Returns a stacked tensor of all 5 lesion masks [MA, HE, EX, SE, OD] for a given image ID.
+        """
         mask_list = []
+
         for lesion_code in ["MA", "HE", "EX", "SE", "OD"]:
             key_list = self.lesion_keys_dict.get(lesion_code, [])
-            match_key = next((k for k in key_list if image_id.lower() in os.path.basename(k).lower()), None)
+            match_key = next(
+                (k for k in key_list if os.path.basename(k).startswith(image_id)),
+                None
+            )
+
             if match_key:
                 mask_img = load_image_from_s3(match_key)
                 mask = Image.open(mask_img).convert("L").resize(self.img_size)
                 mask_tensor = torch.from_numpy(np.array(mask) > 0).float()
             else:
-                # If no mask found, return all zeros
                 mask_tensor = torch.zeros(self.img_size, dtype=torch.float32)
+
             mask_list.append(mask_tensor)
 
-        mask_stack = torch.stack(mask_list)  # Shape: [5, H, W]
-        return mask_stack
+        return torch.stack(mask_list)

@@ -4,6 +4,7 @@ import io
 import pandas as pd
 from dotenv import load_dotenv
 import botocore
+from botocore.exceptions import ClientError
 
 load_dotenv()
 
@@ -22,6 +23,13 @@ s3 = boto3.client(
     config=botocore.client.Config(signature_version='s3v4'),
     use_ssl=False
 )
+
+def check_s3_key_exists(key):
+    try:
+        s3.head_object(Bucket=S3_BUCKET, Key=key)
+        return True
+    except ClientError as e:
+        return False
 
 def load_image_from_s3(key):
     """Returns image bytes (PIL-loadable or cv2.imdecode compatible)"""
